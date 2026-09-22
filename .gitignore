@@ -1,0 +1,13 @@
+# 가상환경 / 내려받은 모델 (수 GB)
+.venv/
+models/
+
+# 실행하면서 생기는 것들
+settings.json
+받아쓰기_*.txt
+__pycache__/
+*.pyc
+
+# 편집기
+.vscode/
+.idea/

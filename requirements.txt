@@ -1,0 +1,4 @@
+# 로컬 실시간 음성인식(STT) 앱 의존성
+faster-whisper>=1.0.3
+sounddevice>=0.4.6
+numpy>=1.24,<2.3
