@@ -3,6 +3,7 @@
 models/
 
 # 실행하면서 생기는 것들
+TROUBLESHOOTING.md
 settings.json
 받아쓰기_*.txt
 __pycache__/

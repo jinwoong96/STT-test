@@ -20,6 +20,8 @@ FONT_BIG = ("Malgun Gothic", 11, "bold")
 METER_MIN_DB = -60.0
 METER_MAX_DB = 0.0
 
+INTERIM_HINT = "말하면 여기에 먼저 나타납니다 (임시 결과)"
+
 
 class SttApp(tk.Tk):
     def __init__(self) -> None:
@@ -154,43 +156,88 @@ class SttApp(tk.Tk):
         self._meter_bar = self.meter.create_rectangle(0, 0, 0, 20, fill="#4a90d9", width=0)
 
         # --- 결과 텍스트 ---------------------------------------------
+        # height 를 작게 잡아 둔다. tk.Text 는 기본 24줄을 요청하는데, 그러면
+        # 세로 공간을 먼저 다 차지해 아래쪽 버튼 줄과 상태바가 배치될 자리가
+        # 남지 않는다(실제로 그렇게 가려져 있었다). 실제 크기는 expand 로 늘어난다.
         self.text = scrolledtext.ScrolledText(
-            outer, wrap="word", font=FONT_TEXT, undo=True,
+            outer, wrap="word", font=FONT_TEXT, undo=True, height=6,
             padx=10, pady=8, relief="solid", borderwidth=1,
         )
-        self.text.pack(fill="both", expand=True)
         self.text.tag_configure("ts", foreground="#8a8a93")
-        # 말하는 도중 미리보기 — 확정되면 지워지고 제대로 된 문장으로 바뀐다
-        self.text.tag_configure("interim", foreground="#9aa0a6")
+        self.text.configure(maxundo=-1, autoseparators=True)
+
+        # --- 말하는 중 미리보기 스트립 --------------------------------
+        # 본문과 분리해 둔다. 임시 결과를 본문에 끼워 넣으면 Tkinter 가 그 구간
+        # 안쪽에 입력된 글자에도 태그를 물려줘서, 미리보기를 지울 때 사용자가
+        # 타이핑한 글자까지 함께 삭제된다. 분리하면 그 경로가 아예 없어진다.
+        # 숨기기/보이기를 바깥 순서와 무관하게 하려고 전용 컨테이너에 담는다.
+        self.strip_holder = ttk.Frame(outer)
+        self.interim_strip = tk.Text(
+            self.strip_holder, height=2, wrap="word", font=FONT_TEXT,
+            fg="#8a8a93", bg="#f1f1f4", relief="flat",
+            padx=10, pady=4, state="disabled", takefocus=0, cursor="arrow",
+        )
+        self.interim_strip.pack(fill="x", pady=(4, 0))
+        self._set_strip(INTERIM_HINT)
 
         # --- 하단 ----------------------------------------------------
-        bottom = ttk.Frame(outer)
-        bottom.pack(fill="x", pady=(8, 0))
+        bottom = self.bottom_bar = ttk.Frame(outer)
 
-        ttk.Button(bottom, text="저장", command=self._save_text).pack(side="left")
-        ttk.Button(bottom, text="전체 복사", command=self._copy_text).pack(
+        # 버튼 줄 — 괄호 안은 단축키
+        ttk.Button(bottom, text="전체 복사", command=self._copy_text).pack(side="left")
+        ttk.Button(bottom, text="저장", command=self._save_text).pack(
             side="left", padx=6
         )
-        ttk.Button(bottom, text="지우기", command=self._clear_text).pack(side="left")
+        ttk.Separator(bottom, orient="vertical").pack(
+            side="left", fill="y", padx=8, pady=2
+        )
+        self.undo_btn = ttk.Button(bottom, text="되돌리기", command=self._undo)
+        self.undo_btn.pack(side="left")
+        self.redo_btn = ttk.Button(bottom, text="다시 실행", command=self._redo)
+        self.redo_btn.pack(side="left", padx=6)
+        ttk.Button(bottom, text="모두 지우기", command=self._clear_text).pack(
+            side="left", padx=(8, 0)
+        )
 
+        # 옵션 줄
+        options = ttk.Frame(outer)
         self.ts_var = tk.BooleanVar(value=self.settings.show_timestamp)
-        ttk.Checkbutton(bottom, text="시각 표시", variable=self.ts_var).pack(
-            side="left", padx=(16, 0)
+        ttk.Checkbutton(options, text="시각 표시", variable=self.ts_var).pack(
+            side="left"
         )
         self.scroll_var = tk.BooleanVar(value=self.settings.autoscroll)
-        ttk.Checkbutton(bottom, text="자동 스크롤", variable=self.scroll_var).pack(
-            side="left", padx=8
+        ttk.Checkbutton(options, text="자동 스크롤", variable=self.scroll_var).pack(
+            side="left", padx=10
         )
         self.interim_var = tk.BooleanVar(value=self.settings.interim_enabled)
         ttk.Checkbutton(
-            bottom, text="말하는 중 미리보기", variable=self.interim_var,
+            options, text="말하는 중 미리보기", variable=self.interim_var,
             command=self._on_interim_toggle,
-        ).pack(side="left", padx=8)
+        ).pack(side="left")
+        ttk.Label(
+            options,
+            text="본문은 직접 편집할 수 있습니다 · Ctrl+Z 되돌리기 / "
+                 "Ctrl+Y 다시 실행 / Ctrl+S 저장",
+            foreground="#8a8a93",
+        ).pack(side="right")
 
         self.status_var = tk.StringVar(value="대기 중 — 시작을 누르면 모델을 불러옵니다")
-        ttk.Label(
+        status = ttk.Label(
             outer, textvariable=self.status_var, foreground="#55555d", anchor="w"
-        ).pack(fill="x", pady=(6, 0))
+        )
+
+        # --- 배치 순서 -----------------------------------------------
+        # 고정 높이인 아래쪽 영역을 side="bottom" 으로 먼저 깔고, 늘어나는 본문을
+        # 맨 마지막에 둔다. 본문을 먼저 pack 하면 그것이 세로 공간을 모두 요청해
+        # 버튼 줄과 상태바가 0px 로 밀려 화면에서 사라진다.
+        status.pack(side="bottom", fill="x", pady=(6, 0))
+        options.pack(side="bottom", fill="x", pady=(6, 0))
+        bottom.pack(side="bottom", fill="x", pady=(8, 0))
+        self.strip_holder.pack(side="bottom", fill="x")
+        self.text.pack(side="top", fill="both", expand=True)
+
+        self._bind_shortcuts()
+        self._sync_strip_visibility()
 
     # -------------------------------------------------------- 설정 헬퍼
     def _set_model_selection(self, model_name: str) -> None:
@@ -225,8 +272,7 @@ class SttApp(tk.Tk):
 
     def _on_interim_toggle(self) -> None:
         self.settings.interim_enabled = self.interim_var.get()
-        if not self.settings.interim_enabled:
-            self._clear_interim()
+        self._sync_strip_visibility()
 
     def _on_tune_change(self) -> None:
         self.sens_label.config(text=f"{self.sens_var.get():.0f} dB")
@@ -342,6 +388,7 @@ class SttApp(tk.Tk):
 
         self.listening = True
         self.busy = False
+        self._sync_strip_visibility()      # 듣는 동안만 미리보기 스트립을 띄운다
         self.toggle_btn.config(text="■  중지", state="normal")
         self._set_status(f"듣는 중 — {self.settings.model_name} · 말씀하세요")
 
@@ -353,7 +400,7 @@ class SttApp(tk.Tk):
             self.listener = None
         self.segment_queue.put(None)       # 변환 워커에게 종료 신호
         self.partial_queue.put(None)       # 미리보기 워커에게도
-        self._clear_interim()
+        self._sync_strip_visibility()      # 듣기를 멈추면 스트립도 거둔다
         self._level_db, self._level_active = METER_MIN_DB, False
         self._draw_meter()
         self._reset_controls()
@@ -469,31 +516,67 @@ class SttApp(tk.Tk):
         base = f"듣는 중 — {self.settings.model_name}"
         self._set_status(f"{base} · 변환 대기 {self.pending}개" if self.pending else base)
 
+    def _set_strip(self, text: str) -> None:
+        """미리보기 스트립 내용 교체. 읽기 전용이라 잠깐 풀고 쓴다."""
+        self.interim_strip.configure(state="normal")
+        self.interim_strip.delete("1.0", "end")
+        self.interim_strip.insert("1.0", text)
+        self.interim_strip.configure(state="disabled")
+
     def _clear_interim(self) -> None:
-        """회색 미리보기 글자를 걷어낸다."""
-        span = self.text.tag_ranges("interim")
-        if span:
-            self.text.delete(span[0], span[-1])
+        self._set_strip(INTERIM_HINT if self.listening else "")
+
+    def _sync_strip_visibility(self) -> None:
+        """미리보기를 끄면 스트립을 숨긴다. 빈 회색 띠만 남기지 않도록."""
+        # 듣는 중이 아니면 보여줄 내용이 없다. 빈 회색 띠로 자리만 차지하지 않도록 숨긴다.
+        # 전용 컨테이너 안에 혼자 들어 있어서, 다시 pack 해도 순서가 흐트러지지 않는다.
+        if self.interim_var.get() and self.listening:
+            self.interim_strip.pack(fill="x", pady=(4, 0))
+            self._clear_interim()
+        else:
+            self.interim_strip.pack_forget()
 
     def _show_interim(self, text: str, uid: int) -> None:
         if uid <= self.finalized_id or not self.interim_var.get():
             return              # 이미 확정된 발화의 뒤늦은 미리보기 — 버린다
-        self._clear_interim()
-        self.text.insert("end", text, ("interim",))
-        if self.scroll_var.get():
-            self.text.see("end")
+        self._set_strip(text)
+
+    def _ensure_trailing_newline(self) -> None:
+        """본문이 개행으로 끝나게 맞춘다.
+
+        사용자가 마지막 줄을 편집해 개행을 없애면, 다음에 도착한 문장이 그 줄
+        뒤에 그대로 달라붙는다. 삽입 전에 한 번 확인해 준다.
+        """
+        last = self.text.index("end-1c")
+        if last == "1.0":
+            return                                  # 빈 본문 — 붙일 필요 없다
+        if self.text.get(f"{last}-1c", last) != "\n":
+            self.text.insert("end", "\n")
+
+    def _at_bottom(self) -> bool:
+        """본문이 이미 맨 아래를 보고 있나."""
+        try:
+            return self.text.yview()[1] >= 0.999
+        except tk.TclError:
+            return True
 
     def _append_text(self, text: str, duration: float, elapsed: float, uid: int) -> None:
         # 확정본이 왔으니 이 발화의 미리보기는 더 이상 의미가 없다
         self.finalized_id = max(self.finalized_id, uid)
         self._clear_interim()
         if not text:
-            return              # 잡음이었던 조각 — 회색만 걷어내고 끝
+            return              # 잡음이었던 조각 — 스트립만 비우고 끝
+        # 위쪽을 보며 편집 중이면 따라가지 않는다. 맨 아래를 보고 있을 때만 붙어간다.
+        stick = self._at_bottom()
+        # 자동 삽입마다 구분점을 둬서 Ctrl+Z 가 문장 단위로 되돌려진다
+        self.text.edit_separator()
+        self._ensure_trailing_newline()
         stamp = datetime.now().strftime("%H:%M:%S")
         if self.ts_var.get():
             self.text.insert("end", f"[{stamp}] ", ("ts",))
         self.text.insert("end", text + "\n")
-        if self.scroll_var.get():
+        self.text.edit_separator()
+        if self.scroll_var.get() and stick:
             self.text.see("end")
         speed = duration / elapsed if elapsed > 0 else 0.0
         state = "듣는 중" if self.listening else "중지됨"
@@ -505,15 +588,50 @@ class SttApp(tk.Tk):
         self.status_var.set(message)
 
     # ------------------------------------------------------------ 하단
-    def _committed_text(self) -> str:
-        """확정된 문장만. 아직 회색인 미리보기는 빼고 돌려준다.
+    def _bind_shortcuts(self) -> None:
+        # Tk 기본 바인딩과 겹치는 것은 "break" 로 중복 실행을 막는다
+        self.bind_all("<Control-s>", lambda e: (self._save_text(), "break")[1])
+        self.bind_all("<Control-S>", lambda e: (self._save_text(), "break")[1])
+        self.bind_all("<Control-Shift-C>", lambda e: (self._copy_text(), "break")[1])
+        for seq in ("<Control-z>", "<Control-Z>"):
+            self.text.bind(seq, lambda e: (self._undo(), "break")[1])
+        for seq in ("<Control-y>", "<Control-Y>", "<Control-Shift-Z>"):
+            self.text.bind(seq, lambda e: (self._redo(), "break")[1])
 
-        미리보기는 작은 모델이 대충 뽑은 임시 결과라 저장/복사에 섞이면 안 된다.
+    def _undo(self) -> None:
+        try:
+            self.text.edit_undo()
+        except tk.TclError:
+            self._set_status("더 되돌릴 내용이 없습니다")
+
+    def _redo(self) -> None:
+        try:
+            self.text.edit_redo()
+        except tk.TclError:
+            self._set_status("다시 실행할 내용이 없습니다")
+
+    def _committed_text(self, with_timestamp: bool = True) -> str:
+        """저장·복사 대상. 본문에는 확정된 문장만 들어가므로 그대로 쓰면 된다.
+
+        미리보기는 별도 스트립에 있어서 섞여 들어올 경로가 없다.
+
+        with_timestamp=False 면 `[12:34:56] ` 부분을 뺀다. 문자열을 정규식으로
+        지우지 않고 'ts' 태그 구간을 건너뛰므로, 사용자가 본문을 편집했거나
+        받아쓴 문장 자체에 비슷한 대괄호 표기가 들어 있어도 안전하다.
         """
-        span = self.text.tag_ranges("interim")
-        if not span:
+        if with_timestamp:
             return self.text.get("1.0", "end").strip()
-        return (self.text.get("1.0", span[0]) + self.text.get(span[-1], "end")).strip()
+
+        ranges = self.text.tag_ranges("ts")
+        if not ranges:
+            return self.text.get("1.0", "end").strip()
+        parts, cursor = [], "1.0"
+        for i in range(0, len(ranges), 2):
+            start, end = ranges[i], ranges[i + 1]
+            parts.append(self.text.get(cursor, start))
+            cursor = end
+        parts.append(self.text.get(cursor, "end"))
+        return "".join(parts).strip()
 
     def _save_text(self) -> None:
         content = self._committed_text()
@@ -535,19 +653,26 @@ class SttApp(tk.Tk):
         self._set_status(f"저장됨: {path}")
 
     def _copy_text(self) -> None:
-        content = self._committed_text()
+        # 다른 곳에 붙여넣을 용도라 시각은 빼고 문장만 넘긴다.
+        # (파일 저장은 기록용이므로 시각을 유지한다)
+        content = self._committed_text(with_timestamp=False)
         if not content:
+            self._set_status("복사할 내용이 없습니다")
             return
         self.clipboard_clear()
         self.clipboard_append(content)
-        self._set_status("전체 내용을 클립보드에 복사했습니다")
+        lines = content.count("\n") + 1
+        self._set_status(f"{lines}줄을 클립보드에 복사했습니다 (시각 제외)")
 
     def _clear_text(self) -> None:
-        if self.text.get("1.0", "end").strip() and not messagebox.askyesno(
-            "지우기", "받아쓴 내용을 모두 지울까요?"
-        ):
+        if not self.text.get("1.0", "end").strip():
+            self._set_status("지울 내용이 없습니다")
             return
+        # 확인 창을 띄우지 않는다. Ctrl+Z 로 한 번에 되돌아오므로 되물을 이유가 없다.
+        self.text.edit_separator()      # 지우기 전체를 한 번에 되돌리도록
         self.text.delete("1.0", "end")
+        self.text.edit_separator()
+        self._set_status("모두 지웠습니다 — Ctrl+Z 로 되돌릴 수 있습니다")
 
     def _on_close(self) -> None:
         if self.listening:
